@@ -16,7 +16,8 @@ Compose queries of fragments
 ```ts
 const table = sql`SELECT 'test' AS name`
 
-const query = sql`SELECT name FROM (${table})`.query(client, {}) // [{ name: 'test' }]
+const query = sql`SELECT name FROM (${table})`.query(client)
+query() // [{ name: 'test' }]
 ```
 
 Properly escape literals, identifiers, values
