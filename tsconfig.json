@@ -1,6 +1,9 @@
 {
-    "compilerOptions": {
-        "lib": ["ES2019"],
-        "esModuleInterop": true
-    }
+  "compilerOptions": {
+    "lib": ["ES2019"],
+    "esModuleInterop": true,
+    "outDir": "dist",
+    "declaration": true
+  },
+  "files": ["src/index.ts"]
 }
