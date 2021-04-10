@@ -9,7 +9,7 @@ Use queries like regular functions
 ```ts
 const query = sql`SELECT name FROM users WHERE id = ${a`id`}`.query(client)
 
-const names = ids.map(id => query({ id })?.[0]?.name)
+const names = ids.map(id => query({ id })?.rows?.[0]?.name)
 ```
 
 Compose queries of fragments
