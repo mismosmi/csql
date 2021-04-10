@@ -2,6 +2,7 @@ import * as pg from "pg";
 import format from "pg-format";
 import * as uuid from "uuid";
 
+// values that can be passed to postgres directly
 type Value =
   | null
   | undefined
@@ -12,24 +13,34 @@ type Value =
   | Value[]
   | { [key: string]: Value };
 
+// access value from arguments
 type Accessor<A> = (values: A) => Value;
 
+// map between argument types when integrating one sql fragment in another
 type Mapper<I, A> = (values: I) => A;
 
+// return something that is already typed
 type GenericQueryResult<Row> = {
   rows: Row[];
 };
 
+// interface for pg.Client or pg.Pool
 interface Client {
   query(config: pg.QueryConfig): Promise<{ rows: pg.QueryResultRow[] }>;
 }
 
+// sql TTL returns a function with a property named 'query' of this type
+// this function accepts a pg-client and returns a function that will actually
+// execute the query on that client
 interface QueryMethod<A> {
   <Row extends pg.QueryResultRow = any>(conn: Client, values?: A): (
     values?: A
   ) => Promise<GenericQueryResult<Row>>;
 }
 
+// the build-method is returned from the sql TTL
+// it builds a QueryFragment that can be reused in further queries or
+// turned into its own query by using its query-method
 const isBuildMethodField = Symbol("isBuildMethod");
 interface BuildMethod<A> {
   (): QueryFragment<A>;
@@ -38,10 +49,12 @@ interface BuildMethod<A> {
   [isBuildMethodField]: true;
 }
 
+// type guard for the build method
 function isBuildMethod<A>(fn: Function): fn is BuildMethod<A> {
   return isBuildMethodField in fn && fn[isBuildMethodField];
 }
 
+// the basic building block of a query
 abstract class Fragment<A> {
   abstract map<I>(mapper: Mapper<I, A>): Fragment<I>;
   abstract prepare(argOffset: number): [string, Accessor<A>[]];
@@ -66,6 +79,7 @@ abstract class Fragment<A> {
   }
 }
 
+// a string is literal sql code
 class StringFragment<A> extends Fragment<A> {
   constructor(public readonly text: string) {
     super();
@@ -81,6 +95,9 @@ class StringFragment<A> extends Fragment<A> {
   }
 }
 
+// an argument is something that can be passed to the query at call-time
+// that is after calling `query`
+// will show up in the final sql string as $1, $2, etc.
 class ArgumentFragment<A> extends Fragment<A> {
   constructor(public readonly accessor: Accessor<A>) {
     super();
@@ -99,6 +116,7 @@ class ArgumentFragment<A> extends Fragment<A> {
   }
 }
 
+// a subquery consists of further fragments
 class QueryFragment<A> extends Fragment<A> {
   constructor(public readonly fragments: Fragment<A>[]) {
     super();
@@ -135,6 +153,8 @@ class QueryFragment<A> extends Fragment<A> {
   }
 }
 
+// a literal will show up in the finished sql string passed to pg as
+// a string encoded with single quotes or a raw number
 class LiteralFragment<A> extends Fragment<A> {
   constructor(public readonly value: Value) {
     super();
@@ -153,6 +173,7 @@ class LiteralFragment<A> extends Fragment<A> {
   }
 }
 
+// table names, column names, ...
 class IdentifierFragment<A> extends Fragment<A> {
   constructor(public readonly name: string) {
     super();
@@ -169,6 +190,9 @@ class IdentifierFragment<A> extends Fragment<A> {
   }
 }
 
+// a value that is hard coded to the fragment built using the sql TTL
+// but that will be passed as an argument to postgres.
+// will show up in the final SQL string as $1, $2, ...
 class ValueFragment<A> extends Fragment<A> {
   constructor(public readonly value: Value) {
     super();
@@ -187,14 +211,18 @@ class ValueFragment<A> extends Fragment<A> {
   }
 }
 
+// options for the query-method
 type QueryOptions<Row extends pg.QueryResultRow> = {
   validate?: (input: pg.QueryResultRow) => input is Row;
 };
 
+// the main component of this library
+// build a fragment of an sql query using a TTL
 export const sql = <A extends object>(
   strings: TemplateStringsArray,
   ...args: (Value | Fragment<A> | BuildMethod<A> | Accessor<A>)[]
 ) => {
+  // build fragments from the arguments passed in using `${arg}` notation
   const fragments: Fragment<A>[] = [
     new StringFragment(strings[0]),
     ...args.flatMap((arg, index) => {
@@ -202,6 +230,10 @@ export const sql = <A extends object>(
     }),
   ];
 
+  // build the fragment
+  // pass a mapper if needed
+  // you need a mapper if you integrate one fragment in another and you need to
+  // map between argument types
   const build: BuildMethod<A> = Object.assign(
     <I>(mapper?: Mapper<I, A>) => {
       return mapper
@@ -209,26 +241,34 @@ export const sql = <A extends object>(
         : new QueryFragment(fragments);
     },
     {
+      // turn a fragment into a callable query by calling this
+      // pass in a pg.Client or pg.Pool
       query: <Row extends pg.QueryResultRow = any>(
         conn: Client,
         options?: QueryOptions<Row>
       ): ((values?: A) => Promise<GenericQueryResult<Row>>) => {
+        // use a unique identifier for the query to enable caching
+        // if the query is called multiple times on a single postgres connection
         const name: string = uuid.v4();
         const [query, accessors] = QueryFragment.staticPrepare(fragments, 1);
 
+        // actually execute the query
         const execute = async (
           // TODO: make typescript check that this can't be called without
           // an argument if A is not {}
           values: A = {} as any
         ): Promise<GenericQueryResult<Row>> => {
+          // build the array of arguments matching the $1, $2, ... placeholders
           const mappedValues = accessors.map((accessor) => accessor(values));
 
+          // finally execute the query
           const ret = await conn.query({
             name,
             text: query,
             values: mappedValues,
           });
 
+          // if type guard for the return type is given, use it
           if (options?.validate) {
             return {
               rows: ret.rows.map((row, index) => {
@@ -240,6 +280,7 @@ export const sql = <A extends object>(
             };
           }
 
+          // else assert type and return
           return ret as GenericQueryResult<Row>;
         };
 
@@ -264,6 +305,7 @@ function baseTTL(strings: TemplateStringsArray, ...args: ToString[]): string {
   ].join("");
 }
 
+// pass an identifier to the sql TTL as `i\`identifier\`` or `i('identifier')`
 export function i<A>(
   strings: TemplateStringsArray | string,
   ...args: ToString[]
@@ -280,6 +322,7 @@ function isTemplateStringsArray(
   return Array.isArray(obj) && "raw" in obj;
 }
 
+// pass a literal to the sql TTL as `l\`value\`` or `l(value)`
 export function l<A>(
   strings: TemplateStringsArray | Value,
   ...args: ToString[]
@@ -290,6 +333,7 @@ export function l<A>(
   return new LiteralFragment<A>(strings);
 }
 
+// pass an argument by just giving the argument name as `a\`name\`` or `a('name')`
 export function a<A extends { [key: string]: any }>(
   name: keyof A | TemplateStringsArray
 ): ArgumentFragment<A> {
