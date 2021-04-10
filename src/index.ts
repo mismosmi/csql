@@ -1,4 +1,4 @@
-import { Pool, Client, QueryResultRow } from "pg";
+import * as pg from "pg";
 import format from "pg-format";
 import * as uuid from "uuid";
 
@@ -16,14 +16,18 @@ type Accessor<A> = (values: A) => Value;
 
 type Mapper<I, A> = (values: I) => A;
 
-type QueryResult<Row> = {
+type GenericQueryResult<Row> = {
   rows: Row[];
 };
 
+interface Client {
+  query(config: pg.QueryConfig): Promise<{ rows: pg.QueryResultRow[] }>;
+}
+
 interface QueryMethod<A> {
-  <Row extends QueryResultRow = any>(conn: Pool | Client, values?: A):
-    | ((values: A) => Promise<QueryResult<Row>>)
-    | Promise<QueryResult<Row>>;
+  <Row extends pg.QueryResultRow = any>(conn: Client, values?: A): (
+    values?: A
+  ) => Promise<GenericQueryResult<Row>>;
 }
 
 const isBuildMethodField = Symbol("isBuildMethod");
@@ -58,7 +62,7 @@ abstract class Fragment<A> {
       return new ArgumentFragment(source);
     }
 
-    return new ArgumentFragment(() => source);
+    return new ValueFragment(source);
   }
 }
 
@@ -91,7 +95,7 @@ class ArgumentFragment<A> extends Fragment<A> {
   }
 
   public toString(): string {
-    return "<ARG>";
+    return `<ARG ${this.accessor.toString()}>`;
   }
 }
 
@@ -121,7 +125,7 @@ class QueryFragment<A> extends Fragment<A> {
         argOffset + accessors.length
       );
       queryStrings.push(fragmentString);
-      accessors.concat(fragmentAccessors);
+      accessors.push(...fragmentAccessors);
     });
     return [queryStrings.join(""), accessors];
   }
@@ -145,7 +149,7 @@ class LiteralFragment<A> extends Fragment<A> {
   }
 
   public toString(): string {
-    return `<VALUE ${JSON.stringify(this.value)}>`;
+    return `<LITERAL ${JSON.stringify(this.value)}>`;
   }
 }
 
@@ -165,9 +169,27 @@ class IdentifierFragment<A> extends Fragment<A> {
   }
 }
 
-export const sql = <A>(
+class ValueFragment<A> extends Fragment<A> {
+  constructor(public readonly value: Value) {
+    super();
+  }
+
+  public map<I>(): ValueFragment<I> {
+    return new ValueFragment(this.value);
+  }
+
+  public prepare(argOffset: number): [string, Accessor<A>[]] {
+    return [`$${argOffset}`, [() => this.value]];
+  }
+
+  public toString(): string {
+    return `<VALUE ${JSON.stringify(this.value)}>`;
+  }
+}
+
+export const sql = <A extends object>(
   strings: TemplateStringsArray,
-  ...args: (Value | Fragment<A> | BuildMethod<A>)[]
+  ...args: (Value | Fragment<A> | BuildMethod<A> | Accessor<A>)[]
 ) => {
   const fragments: Fragment<A>[] = [
     new StringFragment(strings[0]),
@@ -183,16 +205,17 @@ export const sql = <A>(
         : new QueryFragment(fragments);
     },
     {
-      query: <Row extends QueryResultRow = any>(
-        conn: Pool | Client,
-        values?: A
-      ):
-        | Promise<QueryResult<Row>>
-        | ((values: A) => Promise<QueryResult<Row>>) => {
+      query: <Row extends pg.QueryResultRow = any>(
+        conn: Client
+      ): ((values?: A) => Promise<GenericQueryResult<Row>>) => {
         const name: string = uuid.v4();
-        const [query, accessors] = QueryFragment.staticPrepare(fragments, 0);
+        const [query, accessors] = QueryFragment.staticPrepare(fragments, 1);
 
-        const execute = async (values: A): Promise<QueryResult<Row>> => {
+        const execute = async (
+          // TODO: make typescript check that this can't be called without
+          // an argument if A is not {}
+          values: A = {} as any
+        ): Promise<GenericQueryResult<Row>> => {
           const mappedValues = accessors.map((accessor) => accessor(values));
 
           const ret = await conn.query({
@@ -201,12 +224,8 @@ export const sql = <A>(
             values: mappedValues,
           });
 
-          return ret;
+          return ret as GenericQueryResult<Row>;
         };
-
-        if (values) {
-          return execute(values);
-        }
 
         return execute;
       },
@@ -222,13 +241,7 @@ interface ToString {
   toString(): string;
 }
 
-function baseTTL(
-  strings: TemplateStringsArray | string,
-  ...args: ToString[]
-): string {
-  if (typeof strings === "string") {
-    return strings;
-  }
+function baseTTL(strings: TemplateStringsArray, ...args: ToString[]): string {
   return [
     strings[0],
     ...args.flatMap((arg, index) => [arg.toString(), strings[index + 1]]),
@@ -236,17 +249,29 @@ function baseTTL(
 }
 
 export function i<A>(
-  strings: TemplateStringsArray,
+  strings: TemplateStringsArray | string,
   ...args: ToString[]
 ): IdentifierFragment<A> {
+  if (typeof strings === "string") {
+    return new IdentifierFragment<A>(strings);
+  }
   return new IdentifierFragment<A>(baseTTL(strings, ...args));
 }
 
+function isTemplateStringsArray(
+  obj: TemplateStringsArray | Value
+): obj is TemplateStringsArray {
+  return Array.isArray(obj) && "raw" in obj;
+}
+
 export function l<A>(
-  strings: TemplateStringsArray,
+  strings: TemplateStringsArray | Value,
   ...args: ToString[]
 ): LiteralFragment<A> {
-  return new LiteralFragment<A>(baseTTL(strings, ...args));
+  if (isTemplateStringsArray(strings)) {
+    return new LiteralFragment<A>(baseTTL(strings, ...args));
+  }
+  return new LiteralFragment<A>(strings);
 }
 
 export function a<A extends { [key: string]: any }>(
@@ -260,11 +285,3 @@ export function a<A extends { [key: string]: any }>(
   }
   throw new TypeError("Argument builder received invalid arguments");
 }
-
-const limit = sql<{ limit: number }>`
-    LIMIT ${a`limit`}
-`;
-
-const test = sql<{ name: string; limit: number }>`
-    SELECT ${a`name`} FROM ${i`test`} ${limit};
-`;
