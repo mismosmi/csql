@@ -70,4 +70,11 @@ describe("query", () => {
     expect(client.query).toHaveBeenCalledTimes(2);
     expect(client.query.mock.calls[1][0].name).toBe(name);
   });
+
+  it("validates result", async () => {
+    const validate = jest.fn().mockReturnValue(true);
+    client.query.mockResolvedValueOnce({ rows: [{ test: "TEST" }] });
+    await sql`QUERY`.query(client, { validate })();
+    expect(validate).toHaveBeenCalledWith({ test: "TEST" });
+  });
 });

@@ -187,6 +187,10 @@ class ValueFragment<A> extends Fragment<A> {
   }
 }
 
+type QueryOptions<Row extends pg.QueryResultRow> = {
+  validate?: (input: pg.QueryResultRow) => input is Row;
+};
+
 export const sql = <A extends object>(
   strings: TemplateStringsArray,
   ...args: (Value | Fragment<A> | BuildMethod<A> | Accessor<A>)[]
@@ -206,7 +210,8 @@ export const sql = <A extends object>(
     },
     {
       query: <Row extends pg.QueryResultRow = any>(
-        conn: Client
+        conn: Client,
+        options?: QueryOptions<Row>
       ): ((values?: A) => Promise<GenericQueryResult<Row>>) => {
         const name: string = uuid.v4();
         const [query, accessors] = QueryFragment.staticPrepare(fragments, 1);
@@ -223,6 +228,17 @@ export const sql = <A extends object>(
             text: query,
             values: mappedValues,
           });
+
+          if (options?.validate) {
+            return {
+              rows: ret.rows.map((row, index) => {
+                if (!options.validate(row)) {
+                  throw new TypeError(`Row ${index} is invalid`);
+                }
+                return row;
+              }),
+            };
+          }
 
           return ret as GenericQueryResult<Row>;
         };
